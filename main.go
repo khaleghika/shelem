@@ -40,8 +40,6 @@ func main() {
 
 	// پردازش پیام‌ها
 	for update := range updates {
-		msg := tgbotapi.NewMessage(chatid, "به بات خوش آمدید!")
-		bot.Send(msg)
 
 		if update.Message == nil { // skip any non-Message Updates
 			continue
@@ -50,6 +48,8 @@ func main() {
 		if update.Message.Chat == nil {
 			continue
 		}
+		msg := tgbotapi.NewMessage(update.Message.Chat.ID, "به بات خوش آمدید!")
+		bot.Send(msg)
 
 		state, ok := db[update.Message.Chat.ID]
 
