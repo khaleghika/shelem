@@ -40,6 +40,9 @@ func main() {
 
 	// پردازش پیام‌ها
 	for update := range updates {
+		msg := tgbotapi.NewMessage(chatid, "به بات خوش آمدید!")
+		bot.Send(msg)
+
 		if update.Message == nil { // skip any non-Message Updates
 			continue
 		}
