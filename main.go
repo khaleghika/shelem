@@ -48,8 +48,8 @@ func main() {
 		if update.Message.Chat == nil {
 			continue
 		}
-		msg := tgbotapi.NewMessage(update.Message.Chat.ID, "به بات خوش آمدید!")
-		bot.Send(msg)
+		rmsg := tgbotapi.NewMessage(update.Message.Chat.ID, "به بات خوش آمدید!")
+		bot.Send(rmsg)
 
 		state, ok := db[update.Message.Chat.ID]
 
