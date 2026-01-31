@@ -4,6 +4,8 @@ type GameState int
 
 const (
 	StateStart GameState = iota
+	StateNewGame
+	StateNewHand
 	StateSelectTrump
 	StateSelectHand
 	StateInputOtherScore

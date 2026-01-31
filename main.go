@@ -4,14 +4,13 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"strconv"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/joho/godotenv"
 )
-
-var db map[int64]*Game
 
 func main() {
 	err := godotenv.Load()
@@ -29,7 +28,7 @@ func main() {
 		log.Panic(err)
 	}
 
-	bot.Debug = true
+	//bot.Debug = true
 
 	log.Printf("Authorized on account %s", bot.Self.UserName)
 
@@ -37,36 +36,25 @@ func main() {
 	u.Timeout = 60
 
 	updates := bot.GetUpdatesChan(u)
+	db := make(map[int64]*Game)
 
-	// پردازش پیام‌ها
 	for update := range updates {
 
-		if update.Message == nil { // skip any non-Message Updates
+		chat := update.FromChat()
+
+		if chat == nil {
 			continue
 		}
 
-		if update.Message.Chat == nil {
-			continue
-		}
-		rmsg := tgbotapi.NewMessage(update.Message.Chat.ID, "به بات خوش آمدید!")
-		bot.Send(rmsg)
-
-		state, ok := db[update.Message.Chat.ID]
+		state, ok := db[chat.ID]
 
 		if !ok {
 			state = &Game{}
-			db[update.Message.Chat.ID] = state
-			if update.Message.Text == "/start" {
-				m := createStartGame(update.Message.Chat.ID, update.Message.MessageID)
-				bot.Send(m)
-			} else {
-				m := createStartGameWithError(update.Message.Chat.ID, update.Message.MessageID)
-				bot.Send(m)
-			}
+			db[chat.ID] = state
 		}
 
 		state.State = processUpdate(state, update)
-		msg := sendResponse(state.State, update.Message.Chat.ID, update.Message.MessageID)
+		msg := sendResponse(state, chat.ID)
 		bot.Send(msg)
 	}
 }
@@ -77,117 +65,162 @@ func processUpdate(game *Game, update tgbotapi.Update) GameState {
 
 	switch state {
 	case StateStart:
-		if update.CallbackQuery != nil {
-			if update.CallbackQuery.Data == "start_game" {
-				return StateSelectTrump
-			}
-		}
+		return StateNewGame
+	case StateNewGame:
+		return StateNewHand
+	case StateNewHand:
+		game.Items = append(game.Items, &GameItem{})
+		return StateSelectTrump
 	case StateSelectTrump:
-		if update.CallbackQuery != nil {
-			switch update.CallbackQuery.Data {
-			case "red_team":
-				game.Items[len(game.Items)-1].TrumpTeam = RedTeam
-			case "black_team":
-				game.Items[len(game.Items)-1].TrumpTeam = BlackTeam
-			}
+		switch update.Message.Text {
+		case "قرمز":
+			game.Items[len(game.Items)-1].TrumpTeam = RedTeam
+		case "سیاه":
+			game.Items[len(game.Items)-1].TrumpTeam = BlackTeam
+		}
+		return StateSelectHand
+	case StateSelectHand:
+		value, err := strconv.Atoi(update.Message.Text)
+		if err != nil {
 			return StateSelectHand
 		}
-	case StateSelectHand:
-		if update.CallbackQuery != nil {
-			value := update.CallbackQuery.Data
-			game.Items[len(game.Items)-1].TrumpScore, _ = strconv.Atoi(value)
-			return StateInputOtherScore
-		}
+		game.Items[len(game.Items)-1].Claim = value
+		return StateInputOtherScore
 	case StateInputOtherScore:
-		if update.CallbackQuery != nil {
-			value := update.CallbackQuery.Data
-			game.Items[len(game.Items)-1].OpponentScore, _ = strconv.Atoi(value)
+		value, err := strconv.Atoi(update.Message.Text)
+		if err != nil {
 			return StateInputOtherScore
 		}
+		item := game.Items[len(game.Items)-1]
+		item.OpponentScore = value
+		score, err := calc(item)
+		if err != nil {
+			return StateInputOtherScore
+		}
+		item.TrumpScore = score
+
+		updateTotal(game)
+
+		return StateNewHand
 	}
 
 	return state
 }
 
-func sendResponse(state GameState, chatid int64, msgid int) tgbotapi.MessageConfig {
-	switch state {
-	case StateStart:
-		return createStartGame(chatid, msgid)
+func sendResponse(game *Game, chatid int64) tgbotapi.MessageConfig {
+	switch game.State {
+	case StateNewGame:
+		return createStartGame(chatid)
+	case StateNewHand:
+		return createStartHand(chatid, game)
 	case StateSelectTrump:
-		return createSelectTeam(chatid, msgid)
+		return createSelectTeam(chatid)
 	case StateSelectHand:
-		return createSelectHand(chatid, msgid)
+		return createSelectHand(chatid)
 	case StateInputOtherScore:
-		return createSelectHand(chatid, msgid)
+		return createSelectScore(chatid)
 	}
 
-	return createStartGameWithError(chatid, msgid)
+	return createStartGameWithError(chatid)
 }
 
-func createStartGame(chatid int64, msgid int) tgbotapi.MessageConfig {
-	replyKeyboard := tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("شروع بازی جدید", "start_game"),
-		),
+func createStartGame(chatid int64) tgbotapi.MessageConfig {
+	msg := tgbotapi.NewMessage(chatid, "برای شروع بازی جدید کلیک کنید")
+	msg.ReplyMarkup = tgbotapi.NewOneTimeReplyKeyboard(
+		[]tgbotapi.KeyboardButton{
+			tgbotapi.NewKeyboardButton("شروع بازی جدید"),
+		},
 	)
-
-	msg := tgbotapi.NewMessage(chatid, "به بات خوش آمدید!")
-	msg.ReplyMarkup = replyKeyboard
-	msg.ReplyToMessageID = msgid
 	return msg
 }
 
-func createStartGameWithError(chatid int64, msgid int) tgbotapi.MessageConfig {
-	replyKeyboard := tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("شروع بازی جدید", "start_game"),
-		),
+func createStartHand(chatID int64, game *Game) tgbotapi.MessageConfig {
+	text := fmt.Sprintf("امتیاز تیم قرمز: %d\nامتیاز تیم سیاه: %d", game.RedTeamScore, game.BalckTeamScore)
+	msg := tgbotapi.NewMessage(chatID, text)
+	msg.ReplyMarkup = tgbotapi.NewOneTimeReplyKeyboard(
+		[]tgbotapi.KeyboardButton{
+			tgbotapi.NewKeyboardButton("ثبت دست جدید"),
+		},
 	)
+	return msg
+}
 
+func createStartGameWithError(chatid int64) tgbotapi.MessageConfig {
 	msg := tgbotapi.NewMessage(chatid, "دستور ورودی قابل پردازش نیست")
-	msg.ReplyMarkup = replyKeyboard
-	msg.ReplyToMessageID = msgid
+	msg.ReplyMarkup = tgbotapi.NewOneTimeReplyKeyboard(
+		[]tgbotapi.KeyboardButton{
+			tgbotapi.NewKeyboardButton("شروع بازی جدید"),
+		},
+	)
 	return msg
 }
 
-func createSelectTeam(chatid int64, msgid int) tgbotapi.MessageConfig {
-	replyKeyboard := tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("تیم قرمز", "red_team"),
-			tgbotapi.NewInlineKeyboardButtonData("تیم سیاه", "black_team"),
-		),
+func createSelectTeam(chatid int64) tgbotapi.MessageConfig {
+	msg := tgbotapi.NewMessage(chatid, "کدام تیم حاکم است؟")
+	msg.ReplyMarkup = tgbotapi.NewOneTimeReplyKeyboard(
+		[]tgbotapi.KeyboardButton{
+			tgbotapi.NewKeyboardButton("قرمز"),
+			tgbotapi.NewKeyboardButton("سیاه"),
+		},
 	)
-
-	msg := tgbotapi.NewMessage(chatid, "کدام تیم حاکم شد؟")
-	msg.ReplyMarkup = replyKeyboard
-	msg.ReplyToMessageID = msgid
 	return msg
 }
 
-func createSelectHand(chatid int64, msgid int) tgbotapi.MessageConfig {
-	replyKeyboard := tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("100", "100"),
-			tgbotapi.NewInlineKeyboardButtonData("105", "105"),
-			tgbotapi.NewInlineKeyboardButtonData("110", "110"),
-			tgbotapi.NewInlineKeyboardButtonData("115", "115"),
-			tgbotapi.NewInlineKeyboardButtonData("120", "120"),
-			tgbotapi.NewInlineKeyboardButtonData("125", "125"),
-			tgbotapi.NewInlineKeyboardButtonData("130", "130"),
-			tgbotapi.NewInlineKeyboardButtonData("135", "135"),
-			tgbotapi.NewInlineKeyboardButtonData("140", "140"),
-			tgbotapi.NewInlineKeyboardButtonData("145", "145"),
-			tgbotapi.NewInlineKeyboardButtonData("150", "150"),
-			tgbotapi.NewInlineKeyboardButtonData("155", "155"),
-			tgbotapi.NewInlineKeyboardButtonData("160", "160"),
-			tgbotapi.NewInlineKeyboardButtonData("165", "شلم"),
-			tgbotapi.NewInlineKeyboardButtonData("330", "سرشلم"),
-		),
-	)
-
+func createSelectHand(chatid int64) tgbotapi.MessageConfig {
 	msg := tgbotapi.NewMessage(chatid, "حاکم چند خواند؟")
-	msg.ReplyMarkup = replyKeyboard
-	msg.ReplyToMessageID = msgid
+	msg.ReplyMarkup = tgbotapi.NewOneTimeReplyKeyboard(
+		[]tgbotapi.KeyboardButton{
+			tgbotapi.NewKeyboardButton("100"),
+			tgbotapi.NewKeyboardButton("105"),
+			tgbotapi.NewKeyboardButton("110"),
+			tgbotapi.NewKeyboardButton("115"),
+		},
+		[]tgbotapi.KeyboardButton{
+			tgbotapi.NewKeyboardButton("120"),
+			tgbotapi.NewKeyboardButton("125"),
+			tgbotapi.NewKeyboardButton("130"),
+			tgbotapi.NewKeyboardButton("135"),
+		},
+		[]tgbotapi.KeyboardButton{
+			tgbotapi.NewKeyboardButton("140"),
+			tgbotapi.NewKeyboardButton("145"),
+			tgbotapi.NewKeyboardButton("150"),
+			tgbotapi.NewKeyboardButton("155"),
+		},
+		[]tgbotapi.KeyboardButton{
+			tgbotapi.NewKeyboardButton("160"),
+			tgbotapi.NewKeyboardButton("شلم"),
+			tgbotapi.NewKeyboardButton("سرشلم"),
+		},
+	)
+	return msg
+}
+
+func createSelectScore(chatID int64) tgbotapi.MessageConfig {
+	msg := tgbotapi.NewMessage(chatID, "حریف حاکم چند امتیاز گرفت؟")
+	msg.ReplyMarkup = tgbotapi.NewOneTimeReplyKeyboard(
+		[]tgbotapi.KeyboardButton{
+			tgbotapi.NewKeyboardButton("0"),
+			tgbotapi.NewKeyboardButton("5"),
+			tgbotapi.NewKeyboardButton("10"),
+			tgbotapi.NewKeyboardButton("15"),
+			tgbotapi.NewKeyboardButton("20"),
+			tgbotapi.NewKeyboardButton("25"),
+			tgbotapi.NewKeyboardButton("30"),
+			tgbotapi.NewKeyboardButton("35"),
+		},
+		[]tgbotapi.KeyboardButton{
+			tgbotapi.NewKeyboardButton("40"),
+			tgbotapi.NewKeyboardButton("45"),
+			tgbotapi.NewKeyboardButton("50"),
+			tgbotapi.NewKeyboardButton("55"),
+			tgbotapi.NewKeyboardButton("60"),
+			tgbotapi.NewKeyboardButton("65"),
+			tgbotapi.NewKeyboardButton("70"),
+			tgbotapi.NewKeyboardButton("75"),
+			tgbotapi.NewKeyboardButton("80"),
+		},
+	)
 	return msg
 }
 
@@ -213,11 +246,26 @@ func calc(g *GameItem) (int, error) {
 }
 
 func showScore(bot *tgbotapi.BotAPI, chatID int64, game *Game) {
-	msg := tgbotapi.NewMessage(chatID, fmt.Sprintf("امتیازات:\nقرمز: %d\nسیاه: %d", 100, 200))
-	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("دست جدید", "شروع بازی جدید"),
-		),
-	)
+	msg := tgbotapi.NewMessage(chatID, fmt.Sprintf("امتیازات:\nقرمز: %d\nسیاه: %d", game.RedTeamScore, game.BalckTeamScore))
 	bot.Send(msg)
+}
+
+func updateTotal(game *Game) {
+
+	item := game.Items[len(game.Items)-1]
+
+	if item.TrumpTeam == BlackTeam {
+		game.BalckTeamScore += item.TrumpScore
+		game.RedTeamScore += item.OpponentScore
+	} else {
+		game.RedTeamScore += item.TrumpScore
+		game.BalckTeamScore += item.OpponentScore
+	}
+
+}
+
+func debugProxy() {
+	req, _ := http.NewRequest("GET", "https://google.com", nil)
+	p, _ := http.ProxyFromEnvironment(req)
+	log.Println("USING PROXY:", p)
 }
